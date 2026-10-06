@@ -71,12 +71,10 @@ def get_liked_uris(sp) -> list[str]:
 def get_playlist_uris(sp, playlist_id: str) -> list[str]:
     uris, offset = [], 0
     while True:
-        page = sp.playlist_items(
-            playlist_id, limit=100, offset=offset,
-            fields="items(track(uri)),next",
-        )
-        for item in page["items"]:
-            track = item.get("track")
+        # Spotify's Feb 2026 API: /tracks became /items and "track" became "item"
+        page = sp._get(f"playlists/{playlist_id}/items", limit=100, offset=offset)
+        for entry in page["items"]:
+            track = entry.get("item") or entry.get("track")
             if track and track.get("uri"):
                 uris.append(track["uri"])
         if not page["next"]:
@@ -100,10 +98,12 @@ def find_or_create_playlist(sp, name: str) -> str:
             break
         offset += 50
 
-    pl = sp.user_playlist_create(
-        me, name, public=True,
-        description="Auto-synced from my Liked Songs.",
-    )
+    # POST /users/{id}/playlists was removed in Feb 2026; /me/playlists replaces it
+    pl = sp._post("me/playlists", payload={
+        "name": name,
+        "public": True,
+        "description": "Auto-synced from my Liked Songs.",
+    })
     print(f"Created playlist '{name}'")
     return pl["id"]
 
@@ -118,10 +118,16 @@ def main():
     parser.add_argument("--name", default="Liked Songs (Public)")
     parser.add_argument("--prune", action="store_true",
                         help="remove tracks from the playlist that you've unliked")
+    parser.add_argument("--playlist-id", default=os.environ.get("PLAYLIST_ID"),
+                        help="use an existing playlist (skips find/create); "
+                             "also settable via the PLAYLIST_ID env var")
     args = parser.parse_args()
 
     sp = get_client()
-    playlist_id = find_or_create_playlist(sp, args.name)
+    if args.playlist_id:
+        playlist_id = args.playlist_id
+    else:
+        playlist_id = find_or_create_playlist(sp, args.name)
 
     liked = get_liked_uris(sp)
     in_playlist = get_playlist_uris(sp, playlist_id)
@@ -135,13 +141,15 @@ def main():
     # Go from the oldest chunk to the newest so the final order is correct.
     batches = list(chunks(to_add, BATCH))
     for batch in reversed(batches):
-        sp.playlist_add_items(playlist_id, batch, position=0)
+        sp._post(f"playlists/{playlist_id}/items",
+                 payload={"uris": batch, "position": 0})
     print(f"Added {len(to_add)} new track(s)")
 
     if args.prune:
         to_remove = list(dict.fromkeys(u for u in in_playlist if u not in liked_set))
         for batch in chunks(to_remove, BATCH):
-            sp.playlist_remove_all_occurrences_of_items(playlist_id, batch)
+            sp._delete(f"playlists/{playlist_id}/items",
+                       payload={"items": [{"uri": u} for u in batch]})
         print(f"Removed {len(to_remove)} unliked track(s)")
 
     print(f"Done. {len(liked)} liked songs total.")
